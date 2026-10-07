@@ -1,0 +1,20 @@
+# dependencies
+node_modules/
+
+# secrets & local config (see .env.example)
+.env
+.env.*
+!.env.example
+
+# local data, dev certs, logs
+data/
+certs/
+*.log
+
+# local tooling / editor agents
+tools/
+.vercel
+.agents/
+.claude/
+skills-lock.json
+.DS_Store

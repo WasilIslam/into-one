@@ -1,0 +1,7 @@
+User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /auth/
+Disallow: /login
+
+Sitemap: https://into-one.vercel.app/sitemap.xml

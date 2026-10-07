@@ -1,0 +1,34 @@
+{
+  "name": "into-one",
+  "version": "0.1.0",
+  "description": "Your Gmail and Slack, down to what needs you. Reads the last few hours, hides the noise, leaves a short to-do list you can chat with.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "postgres": "^3.4.9"
+  },
+  "license": "MIT",
+  "author": "Wasil Islam",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/WasilIslam/into-one.git"
+  },
+  "homepage": "https://into-one.vercel.app",
+  "keywords": [
+    "gmail",
+    "slack",
+    "inbox",
+    "triage",
+    "todo",
+    "ai",
+    "openai",
+    "productivity"
+  ],
+  "engines": {
+    "node": ">=20"
+  }
+}

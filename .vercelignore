@@ -1,0 +1,11 @@
+tools/
+data/
+certs/
+.env
+*.log
+node_modules/
+.agents/
+.claude/
+skills-lock.json
+docs/
+README.md

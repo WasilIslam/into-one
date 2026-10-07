@@ -1,0 +1,21 @@
+{
+  "display_information": {
+    "name": "into-one",
+    "description": "Reads your DMs and mentions and turns them into a short to-do list.",
+    "background_color": "#000080"
+  },
+  "oauth_config": {
+    "redirect_urls": [
+      "https://localhost:4100/auth/slack/callback",
+      "https://your-app.vercel.app/auth/slack/callback"
+    ],
+    "scopes": {
+      "user": [
+        "channels:history", "groups:history", "im:history", "mpim:history",
+        "channels:read", "groups:read", "im:read", "mpim:read",
+        "users:read", "users:read.email", "search:read", "team:read", "chat:write"
+      ]
+    }
+  },
+  "settings": { "org_deploy_enabled": false, "socket_mode_enabled": false, "token_rotation_enabled": false }
+}
