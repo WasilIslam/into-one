@@ -170,10 +170,14 @@ function parseScan(text) {
   const t = text.toLowerCase();
   const m = t.match(/(\d+(?:\.\d+)?)\s*(h|hr|hrs|hour|hours|m|min|mins|minutes)\b/);
   let hours = m ? (m[2].startsWith('m') ? Number(m[1]) / 60 : Number(m[1])) : null;
-  if (!hours && /\b(today|24|day|yesterday|overnight)\b/.test(t)) hours = 24;
-  if (!hours && /\b(morning)\b/.test(t)) hours = Math.max(1, new Date().getHours() - 6);
-  const wantsScan = /\b(read|scan|check|fetch|pull|sync|get|what'?s new|catch me up|messages|emails?|inbox)\b/.test(t);
-  if (!hours && !wantsScan) return null;
+  // Only an explicit "read/scan/fetch… messages" request triggers a read; task commands ("mark the email tasks done") don't.
+  const readVerb = /\b(read|scan|fetch|pull|sync|refresh|catch me up|what'?s new)\b/.test(t) || /\bcheck (my |the )?(inbox|messages|emails?|mail|slack|gmail)\b/.test(t);
+  const taskVerb = /\b(mark|done|complete|ignore|hide|rename|due|priority|remind|add (a )?task|create|delete|move|snooze|reopen|note)\b/.test(t);
+  if (taskVerb && (!readVerb || /\btasks?\b/.test(t))) return null;
+  if (!hours && /\b(today|yesterday|overnight|last day|24h)\b/.test(t) && readVerb) hours = 24;
+  if (!hours && /\b(morning)\b/.test(t) && readVerb) hours = Math.max(1, new Date().getHours() - 6);
+  if (hours && !readVerb && !/^\s*(last|past)?\s*[\d.]+\s*(h|hr|hrs|hours?|m|mins?|minutes)\s*$/.test(t)) return null;
+  if (!hours && !readVerb) return null;
   const only = /slack/.test(t) && !/gmail|email|mail/.test(t) ? 'slack' : /gmail|email|mail/.test(t) && !/slack/.test(t) ? 'gmail' : null;
   return { hours: hours || 24, only, capped: hours > scan.MAX_HOURS };
 }
@@ -216,12 +220,18 @@ app.post('/api/chat', async (req, res) => {
         hidden: Object.entries(r.skipped).filter(([, n]) => n).map(([k, n]) => `${n} ${SKIP_LABELS[k] || k}`).join(', '),
       }));
     }
+    // Short ids ("t1") keep the prompt small and stop the model inventing task ids.
+    const recent = store.db.tasks.filter(t => t.status === 'open' || Date.now() - Date.parse(t.doneAt || 0) < 3 * 86400e3);
+    const byId = Object.fromEntries(recent.map((t, i) => [`t${i + 1}`, t]));
     const context = {
       conversations: store.db.items,
-      openTasks: store.db.tasks.filter(t => t.status === 'open').map(t => ({ title: t.title, priority: t.priority, from: t.from, why: t.why, comments: t.comments.map(c => c.text) })),
+      tasks: Object.entries(byId).map(([id, t]) => ({ id, title: t.title, status: t.status, priority: t.priority, due: t.due, from: t.from, where: t.where, why: t.why, notes: t.comments.map(c => c.text) })),
       now: new Date().toISOString(),
     };
-    res.json(await say('bot', await ai.answer(text, context)));
+    const out = await ai.answer(text, context);
+    const changes = applyActions(out.actions, { byId });
+    if (changes.length) await store.save(['tasks', 'feedback']);
+    res.json(await say('bot', [out.reply, ...changes].filter(Boolean).join('\n')));
   } catch (e) {
     res.json(await say('bot', 'Something went wrong: ' + e.message));
   }
@@ -234,20 +244,62 @@ const findTask = (req, res) => {
 };
 
 // status: open | done | ignored. Done/ignored are remembered and shown to the AI next time.
+function setStatus(t, status, reason) {
+  if (!status || status === t.status) return false;
+  t.status = status;
+  t.done = status !== 'open';
+  t.doneAt = t.done ? new Date().toISOString() : null;
+  t.ignoreReason = status === 'ignored' ? reason || null : null;
+  t.autoNote = null;
+  if (t.done) {
+    store.db.feedback.push({ at: t.doneAt, action: status, reason: reason || null, title: t.title, type: t.type, from: t.from, where: t.where, summary: t.summary });
+    store.db.feedback = store.db.feedback.slice(-200);
+  }
+  return true;
+}
+
+const TYPES = ['reply', 'do', 'fix', 'pay', 'review', 'meet', 'promise', 'fyi'];
+const newTask = ({ title, due, priority }) => ({
+  id: crypto.randomUUID(), title: String(title).slice(0, 140), type: 'do', priority: /^P[0-3]$/.test(priority) ? priority : 'P1',
+  due: due || null, source: 'manual', status: 'open', done: false, comments: [], createdAt: new Date().toISOString(),
+});
+
+// Apply actions proposed by a chat. Returns human-readable lines describing what changed.
+function applyActions(actions, { task, byId } = {}) {
+  const done = [];
+  for (const a of actions.slice(0, 10)) {
+    if (!a || typeof a !== 'object') continue;
+    if (a.op === 'create' && a.title) {
+      const t = newTask(a);
+      store.db.tasks.push(t);
+      done.push(`+ Added task: ${t.title}${t.due ? ` (due ${t.due})` : ''}`);
+      continue;
+    }
+    const t = task || (byId && byId[a.task]);
+    if (!t) continue;
+    if (a.op === 'done' && setStatus(t, 'done', 'from chat')) done.push(`✓ Marked done: ${t.title}`);
+    else if (a.op === 'ignore' && setStatus(t, 'ignored', a.reason || 'from chat')) done.push(`– Hidden: ${t.title}`);
+    else if (a.op === 'reopen' && setStatus(t, 'open')) done.push(`↺ Reopened: ${t.title}`);
+    else if (a.op === 'note' && a.text) { t.comments.push({ text: String(a.text).slice(0, 500), at: new Date().toISOString() }); done.push(`✎ Note added to: ${t.title}`); }
+    else if (a.op === 'update') {
+      const changes = [];
+      if (a.title && a.title !== t.title) { t.title = String(a.title).slice(0, 140); changes.push(`title → ${t.title}`); }
+      if (a.due !== undefined && a.due !== t.due) { t.due = a.due || null; changes.push(`due → ${t.due || 'none'}`); }
+      if (/^P[0-3]$/.test(a.priority) && a.priority !== t.priority) { t.priority = a.priority; changes.push(`priority → ${a.priority}`); }
+      if (TYPES.includes(a.type) && a.type !== t.type) { t.type = a.type; changes.push(`type → ${a.type}`); }
+      if (changes.length) { t.updatedAt = new Date().toISOString(); done.push(`✎ Updated ${task ? 'task' : `"${t.title}"`}: ${changes.join(', ')}`); }
+    }
+  }
+  return done;
+}
+
+// Did the user actually ask for a message to be written? (Keeps plain answers out of the draft box.)
+const DRAFT_ASK = /\b(repl(y|ies)|respond|draft|write|send|tell|message|text|email (him|her|them)|let (him|her|them) know|ask (him|her|them)|follow ?up|ping|say|answer (him|her|them)|shorter|longer|rephrase|reword|more (formal|casual|polite)|change (it|the draft)|mention)\b/i;
+
 app.patch('/api/tasks/:id', async (req, res) => {
   const t = findTask(req, res); if (!t) return;
   const { status, reason } = req.body;
-  if (status && status !== t.status) {
-    t.status = status;
-    t.done = status !== 'open';
-    t.doneAt = t.done ? new Date().toISOString() : null;
-    t.ignoreReason = status === 'ignored' ? reason || null : null;
-    t.autoNote = null;
-    if (t.done) {
-      store.db.feedback.push({ at: t.doneAt, action: status, reason: reason || null, title: t.title, type: t.type, from: t.from, where: t.where, summary: t.summary });
-      store.db.feedback = store.db.feedback.slice(-200);
-    }
-  }
+  setStatus(t, status, reason);
   if (reason === 'mute' && t.from) store.db.mutes.push({ id: t.from, label: `${t.from} (${t.where})`, at: new Date().toISOString() });
   await store.save(['tasks', 'feedback', 'mutes']);
   res.json(t);
@@ -269,17 +321,21 @@ app.post('/api/tasks/:id/chat', async (req, res) => {
   if (!source) source = store.db.items.find(i => i.key === t.convKey) || { note: 'No source conversation stored for this task.' };
 
   const history = t.chat || [];
-  let reply, draft = null;
-  try { ({ reply, draft } = await ai.taskAnswer(t, source, history, text)); } catch (e) { reply = 'Something went wrong: ' + e.message; }
+  let reply, draft = null, actions = [];
+  try { ({ reply, draft, actions } = await ai.taskAnswer(t, source, history, text)); } catch (e) { reply = 'Something went wrong: ' + e.message; }
+  // A draft only when one was asked for (or a previous draft is being revised); otherwise show the text as a normal answer.
+  const revising = [...history].reverse().find(m => m.role === 'bot')?.draft && !/\?\s*$/.test(text);
+  if (draft && !DRAFT_ASK.test(text) && !revising) { reply = [reply, draft].filter(Boolean).join('\n\n'); draft = null; }
 
   // Re-read tasks before writing so a scan running at the same time isn't overwritten.
   await store.load(['tasks']);
   const fresh = store.db.tasks.find(x => x.id === t.id);
   if (!fresh) return res.status(404).json({ error: 'task deleted' });
   const now = new Date().toISOString();
-  const bot = { id: crypto.randomUUID(), role: 'bot', text: reply, at: new Date().toISOString(), ...(draft && t.convKey && { draft: { text: draft } }) };
+  const changes = applyActions(actions || [], { task: fresh });
+  const bot = { id: crypto.randomUUID(), role: 'bot', text: [reply, ...changes].filter(Boolean).join('\n'), at: new Date().toISOString(), ...(draft && t.convKey && { draft: { text: draft } }) };
   fresh.chat = [...(fresh.chat || []), { role: 'you', text, at: now }, bot].slice(-60);
-  await store.save(['tasks']);
+  await store.save(['tasks', 'feedback']);
   res.json(fresh);
 });
 
@@ -301,10 +357,17 @@ app.post('/api/tasks/:id/send', async (req, res) => {
       const r = await google.replyInThread(store, acc, a, text);
       sentTo = `email to ${[r.to, ...r.cc].join(', ')}`;
     } else {
-      // Slack keys: channel (DM) or channel:ts (thread / message to reply under).
+      // Reply in the thread of the message this task is about (its existing thread, or a new one under it).
       const { access_token } = store.getTokens(acc);
-      await slack.post(access_token, 'chat.postMessage', { channel: a, text, ...(b && { thread_ts: b }) });
-      sentTo = `Slack ${t.where}`;
+      let target = t.replyTo || { channel: a, thread_ts: b };
+      if (!target.thread_ts) {
+        // Older tasks (DMs) didn't store a target: reply under the latest message from someone else.
+        const h = await slack.api(access_token, 'conversations.history', { channel: a, limit: 15 });
+        const last = h.messages.find(m => m.user && m.user !== acc.meta.userId);
+        if (last) target = { channel: a, thread_ts: last.thread_ts || last.ts };
+      }
+      await slack.post(access_token, 'chat.postMessage', { channel: target.channel, text, ...(target.thread_ts && { thread_ts: target.thread_ts }) });
+      sentTo = `Slack ${t.where}${target.thread_ts ? ' (in thread)' : ''}`;
     }
     Object.assign(msg.draft, { text, sentAt: new Date().toISOString(), sentTo });
     if (req.body.markDone && t.status === 'open') {
@@ -342,7 +405,7 @@ app.post('/api/tasks/:id/comments', async (req, res) => {
 app.post('/api/tasks', async (req, res) => {
   const title = String(req.body.title || '').trim();
   if (!title) return res.status(400).json({ error: 'empty' });
-  const t = { id: crypto.randomUUID(), title, type: 'do', priority: req.body.priority || 'P1', source: 'manual', status: 'open', done: false, comments: [], createdAt: new Date().toISOString() };
+  const t = newTask({ title, priority: req.body.priority });
   store.db.tasks.push(t);
   await store.save(['tasks']);
   res.json(t);

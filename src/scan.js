@@ -161,7 +161,8 @@ async function fetchSlack(acc, since) {
     const ch = m.channel || {};
     const threadTs = m.permalink && new URL(m.permalink).searchParams.get('thread_ts');
     return {
-      ch, ts: m.ts, threadTs: threadTs && threadTs !== m.ts ? threadTs : null,
+      // A thread's first message has thread_ts = its own ts, so parent and replies group together.
+      ch, ts: m.ts, threadTs: threadTs || null,
       from: m.user === myId ? OWNER_NAME : users.get(m.user) || m.username || 'bot',
       email: emails.get(m.user), me: m.user === myId, bot: !!(m.bot_id || bots.has(m.user) || !m.user),
       at: new Date(Number(m.ts) * 1000).toISOString(),
@@ -196,8 +197,11 @@ async function fetchSlack(acc, since) {
     const others = messages.filter(m => !m.me);
     const where = g.ch.is_im ? `DM · ${users.get(g.ch.user) || users.get(g.ch.name) || others[0]?.from || 'someone'}`
       : g.ch.is_mpim ? 'group DM' : `#${g.ch.name}`;
+    // Where a reply should go: the thread itself, or a new thread under the last message from someone else.
+    const lastIn = [...g.messages].reverse().find(m => !m.me) || g.messages[g.messages.length - 1];
+    const replyTo = { channel: g.ch.id, thread_ts: g.thread ? g.rootTs : lastIn.ts };
     convs.push({
-      key: `s:${acc.id}:${g.key}`, source: 'slack', accountId: acc.id, accountLabel: acc.label,
+      key: `s:${acc.id}:${g.key}`, source: 'slack', accountId: acc.id, accountLabel: acc.label, replyTo,
       where: g.thread ? `${where} (thread)` : where,
       with: others[others.length - 1]?.from || 'someone', withId: others[others.length - 1]?.from,
       link: `https://slack.com/app_redirect?team=${team}&channel=${g.ch.id}&message_ts=${messages[messages.length - 1].ts}`,
@@ -268,6 +272,7 @@ async function run({ hours, only }) {
       const fields = {
         type: v.type, title: v.task.title, due: v.task.due || null, priority: v.priority, summary: v.summary, why: v.why,
         from: c.with, where: c.where, source: c.source, link: c.link, lastActivity: lastIn?.at, updatedAt: now,
+        ...(c.replyTo && { replyTo: c.replyTo }),
         // Snapshot of the conversation so you can chat about the task later.
         context: { subject: c.subject, messages: c.messages.map(({ from, email, to, cc, at, text }) => ({ from, email, to, cc, at, text: (text || '').slice(0, 1500) })) },
       };

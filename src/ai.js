@@ -70,27 +70,49 @@ async function triage(convs, tasksByConv, feedback) {
   return out;
 }
 
+// Things either chat may do to tasks. The server validates and applies them.
+const ACTIONS_DOC = `"actions" is a list of changes to make to tasks, ONLY when ${OWNER_NAME} asks for them (or clearly states it's done/handled):
+ {"op":"done"}                                   mark the task done
+ {"op":"ignore","reason":"..."}                  hide the task (not important / already handled)
+ {"op":"reopen"}                                 reopen a done/hidden task
+ {"op":"update","title":"...","due":"Fri","priority":"P0|P1|P2|P3","type":"reply|do|fix|pay|review|meet|promise"}  change any of these fields
+ {"op":"note","text":"..."}                      add a note to the task
+ {"op":"create","title":"...","due":"...","priority":"P1"}  add a NEW task (e.g. a follow-up)
+Never invent actions he didn't ask for. Answering a question = no actions.`;
+
 async function answer(question, context) {
-  return complete([
-    { role: 'system', content: `You are into-one, ${OWNER_NAME}'s inbox assistant. Answer briefly in plain text (no markdown), using only the conversations and tasks given. If the info is not there, say so and suggest scanning (e.g. "read last 6 hours").` },
-    { role: 'user', content: `CONTEXT:\n${JSON.stringify(context)}\n\nQUESTION: ${question}` },
-  ]);
+  const out = JSON.parse(await complete([
+    { role: 'system', content: `You are into-one, ${OWNER_NAME}'s inbox assistant. Answer briefly in plain text (no markdown), using only the conversations and tasks given. If the info is not there, say so and suggest reading more (e.g. "read last 6 hours").
+You can also manage his task list. Tasks have short ids like "t3".
+${ACTIONS_DOC}
+Every action except "create" needs "task":"<id>". In "reply", refer to tasks by their title, never by id. Return JSON {"reply":"...","actions":[...]}. "reply" confirms what you did in one short line when you take actions.` },
+    { role: 'user', content: `CONTEXT:\n${JSON.stringify(context)}\n\nMESSAGE: ${question}` },
+  ], true));
+  return { reply: String(out.reply || ''), actions: Array.isArray(out.actions) ? out.actions : [] };
 }
 
-// Chat about one task, grounded in its source conversation. Returns { reply, draft|null }.
+// Chat about one task, grounded in its source conversation. Returns { intent, reply, draft|null, actions[] }.
 async function taskAnswer(task, source, history, question) {
   const channel = task.source === 'slack' ? 'Slack' : 'email';
   const out = JSON.parse(await complete([
     { role: 'system', content: `You help ${OWNER_NAME} with ONE task from his inbox. You get the task and the full source conversation (with sender/recipient email addresses and dates).
-Answer directly and briefly in plain text (no markdown). Quote exact emails, names, dates and numbers from the source. If the answer isn't in the source, say so.
-When he asks you to write/draft/reply/send/tell someone something, put the exact message in "draft" — ready to send as a ${channel} reply in this same conversation, in his voice: short, friendly, professional, no subject line, ${channel === 'email' ? `sign off as "${OWNER_NAME}"` : 'no sign-off'}. Then "reply" is one short line like "Here's a draft:".
-If he gives feedback on a previous draft ("shorter", "mention Friday"), return the revised full draft.
-Return JSON {"reply": "...", "draft": "..." or null}.` },
-    { role: 'user', content: `TASK:\n${JSON.stringify({ title: task.title, from: task.from, where: task.where, due: task.due, summary: task.summary, notes: (task.comments || []).map(c => c.text) })}\n\nSOURCE CONVERSATION:\n${JSON.stringify(source)}` },
-    ...history.slice(-12).map(m => ({ role: m.role === 'you' ? 'user' : 'assistant', content: m.draft ? `${m.text}\n[draft]\n${m.draft.text}` : m.text })),
+Decide what he wants:
+ - "answer": a question about the task/conversation. Answer directly and briefly in plain text (no markdown) in "reply". Quote exact emails, names, dates and numbers. If it isn't in the source, say so. "draft" MUST be null.
+ - "draft": he asks you to write/reply/send/tell/ask someone something, or gives feedback on a previous draft ("shorter", "mention Friday"). Put ONLY the message to send in "draft" (ready to send as a ${channel} reply in this same conversation, in his voice: short, friendly, professional, no subject line, ${channel === 'email' ? `sign off as "${OWNER_NAME}"` : 'no sign-off'}). "reply" is one short line like "Here's a draft:".
+ - "action": he wants to change the task itself (done, hide, due date, priority, rename, note, follow-up task). Put the changes in "actions" and confirm in one short line in "reply". "draft" null.
+${ACTIONS_DOC}
+In this chat actions apply to THIS task (no "task" field needed), except "create".
+Return JSON {"intent":"answer|draft|action","reply":"...","draft":null or "...","actions":[]}.` },
+    { role: 'user', content: `TASK:\n${JSON.stringify({ title: task.title, from: task.from, where: task.where, due: task.due, priority: task.priority, status: task.status, summary: task.summary, notes: (task.comments || []).map(c => c.text) })}\n\nSOURCE CONVERSATION:\n${JSON.stringify(source)}` },
+    ...history.slice(-12).map(m => ({ role: m.role === 'you' ? 'user' : 'assistant', content: m.draft ? `${m.text}\n[draft${m.draft.sentAt ? ' — already sent' : ''}]\n${m.draft.text}` : m.text })),
     { role: 'user', content: question },
   ], true));
-  return { reply: out.reply || '', draft: out.draft ? String(out.draft) : null };
+  return {
+    intent: out.intent || (out.draft ? 'draft' : 'answer'),
+    reply: String(out.reply || ''),
+    draft: out.intent === 'draft' && out.draft ? String(out.draft) : null,
+    actions: Array.isArray(out.actions) ? out.actions : [],
+  };
 }
 
 module.exports = { triage, answer, taskAnswer, MODEL };

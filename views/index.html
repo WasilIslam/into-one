@@ -268,7 +268,7 @@ function draftHtml(m, t) {
   var acc = t.convKey && state.accounts.find(function (a) { return a.id === t.convKey.split(':')[1]; });
   if (acc && acc.access !== 'write') return '<div class="draft"><div class="small">' + ic('lock') + ' ' + esc(acc.label) + ' is read only. Copy the draft, or reconnect it with &ldquo;Read &amp; reply&rdquo; in Settings.</div>' +
     '<textarea rows="5">' + esc(d.text) + '</textarea></div>';
-  var where = t.source === 'slack' ? src('slack') + 'Slack · ' + esc(t.where) : src('gmail') + 'Reply in the email thread';
+  var where = t.source === 'slack' ? src('slack') + 'Slack · ' + esc(t.where) + ' · replies in thread' : src('gmail') + 'Reply in the email thread';
   return '<div class="draft' + (isBusy ? ' busy' : '') + '"><div class="small">' + where + '</div>' +
     '<textarea rows="5" oninput="drafts[\'' + key + '\']=this.value">' + esc(drafts[key] != null ? drafts[key] : d.text) + '</textarea>' +
     '<div>' + (isBusy ? spinner() + ' sending...'
