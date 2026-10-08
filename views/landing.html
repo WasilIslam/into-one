@@ -346,7 +346,8 @@ document.addEventListener('click', function (e) { if (!$('signin').hidden && !e.
   var q = new URLSearchParams(location.search), m = $('msg');
   if (q.get('sent')) m.innerHTML = '<div class="note ok">Check your inbox. If that email is allowed, a sign-in link is on its way (valid 15 minutes).</div>';
   if (q.get('error')) { m.innerHTML = '<div class="note err"></div>'; m.firstChild.textContent = q.get('error'); }
-  if (q.get('sent') || q.get('error') || q.has('login') || location.pathname === '/login') toggleSignin(true);
+  if (q.get('sent') || q.get('error') || q.has('login')) toggleSignin(true);
+  if (q.has('sent') || q.has('error') || q.has('login')) history.replaceState(null, '', '/'); // clean URL after showing the message
 })();
 lucide.createIcons();
 loop();

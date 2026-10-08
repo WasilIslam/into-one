@@ -12,18 +12,20 @@ const ai = require('./src/ai');
 const app = express();
 const PORT = process.env.INTO_ONE_PORT || 4100;
 const BASE = process.env.PUBLIC_URL || `https://localhost:${PORT}`;
-const page = f => (_req, res) => res.sendFile(path.join(__dirname, 'views', f));
+// HTML is never cached, so nobody sees a stale version of a page.
+const page = f => (_req, res) => res.set('Cache-Control', 'no-cache').sendFile(path.join(__dirname, 'views', f));
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public'), { index: false, maxAge: '1d' })); // logo, icons, robots, sitemap
 app.get('/api/health', (_req, res) => res.json({ ok: true, ai: !!process.env.OPENAI_API_KEY, db: !!store.sql }));
 app.get('/privacy', page('privacy.html'));
 app.get('/terms', page('terms.html'));
-app.get('/login', page('landing.html')); // the landing page opens its sign-in box on /login
+// One public page: the landing page. Old /login links land there (sign-in messages keep their query string).
+app.get('/login', (req, res) => res.redirect(301, '/' + (req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '')));
 
 // ---- Sign in to into-one (Google, allow-listed emails only) -------------
 app.get('/auth/login', (_req, res) => res.redirect(google.authUrl(BASE, auth.newState(res, 'login'), { login: true })));
-app.get('/auth/logout', (_req, res) => { auth.endSession(res); res.redirect('/login'); });
+app.get('/auth/logout', (_req, res) => { auth.endSession(res); res.redirect('/'); });
 
 // ---- Sign in with an emailed link (no password) --------------------------
 const LINK_TTL = 15 * 60e3;
@@ -48,27 +50,27 @@ app.post('/auth/email', async (req, res) => {
         await require('./src/mail').sendSignInLink(email, `${BASE}/auth/email/verify?t=${encodeURIComponent(auth.sign({ purpose: 'magic', email, nonce, exp: now + LINK_TTL }))}`);
       }
     }
-    res.redirect('/login?sent=1');
+    res.redirect('/?sent=1');
   } catch (e) {
     console.error(e);
-    res.redirect('/login?error=' + encodeURIComponent('Could not send the email, try again.'));
+    res.redirect('/?error=' + encodeURIComponent('Could not send the email, try again.'));
   }
 });
 
 // Opening the link only shows a button; the POST signs in. Mail scanners that prefetch links can't burn it.
 app.get('/auth/email/verify', (req, res) => {
   const p = auth.verify(req.query.t);
-  if (!p || p.purpose !== 'magic') return res.status(400).send(shell('This link is invalid or expired. <a href="/login">Get a new one</a>.'));
+  if (!p || p.purpose !== 'magic') return res.status(400).send(shell('This link is invalid or expired. <a href="/?login">Get a new one</a>.'));
   res.send(shell(`<form method="post"><input type="hidden" name="t" value="${String(req.query.t).replace(/"/g, '&quot;')}">
     <p>Sign in to <b>into-one</b> as <b>${p.email}</b>?</p><button type="submit">Sign in</button></form>`));
 });
 
 app.post('/auth/email/verify', async (req, res) => {
   const p = auth.verify(req.body.t);
-  if (!p || p.purpose !== 'magic' || !auth.allowed(p.email)) return res.status(400).send(shell('This link is invalid or expired. <a href="/login">Get a new one</a>.'));
+  if (!p || p.purpose !== 'magic' || !auth.allowed(p.email)) return res.status(400).send(shell('This link is invalid or expired. <a href="/?login">Get a new one</a>.'));
   await store.load(['magic']);
   const link = store.db.magic.find(m => m.nonce === p.nonce && m.exp > Date.now());
-  if (!link) return res.status(400).send(shell('This link was already used. <a href="/login">Get a new one</a>.'));
+  if (!link) return res.status(400).send(shell('This link was already used. <a href="/?login">Get a new one</a>.'));
   store.db.magic = store.db.magic.filter(m => m !== link);
   await store.save(['magic']);
   auth.startSession(res, p.email);
@@ -93,7 +95,7 @@ app.get('/auth/google/callback', async (req, res) => {
       auth.startSession(res, me.email);
       return res.redirect('/');
     } catch (e) {
-      return res.status(400).send(`Sign-in failed: ${e.message}. <a href="/login">Back</a>`);
+      return res.status(400).send(`Sign-in failed: ${e.message}. <a href="/?login">Back</a>`);
     }
   }
   try {
@@ -137,8 +139,8 @@ app.get('/auth/slack/callback', async (req, res) => {
 app.use((req, res, next) => {
   if (auth.session(req)) return next();
   if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'not signed in' });
-  if (req.path === '/') return res.sendFile(path.join(__dirname, 'views', 'landing.html')); // signed-out visitors see the landing page
-  res.redirect('/login');
+  if (req.path === '/') return page('landing.html')(req, res); // signed-out visitors see the landing page
+  res.redirect('/');
 });
 
 // Fresh state from the DB on every request (serverless instances share nothing in memory).

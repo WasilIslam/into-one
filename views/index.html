@@ -185,7 +185,7 @@ function ago(iso) {
 }
 function api(method, url, body) {
   return fetch(url, { method: method, headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined })
-    .then(function (r) { if (r.status === 401) location.href = '/login'; return r.json(); })
+    .then(function (r) { if (r.status === 401) location.href = '/'; return r.json(); })
     .then(function (j) { if (j && j.error) throw new Error(j.error); return j; });
 }
 function load() { return api('GET', '/api/state').then(function (s) { state = s; render(); document.getElementById('me').textContent = s.me; }); }
